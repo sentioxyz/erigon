@@ -944,7 +944,7 @@ func opCreate(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]b
 		input  = scope.Memory.GetCopy(offset.Uint64(), size.Uint64())
 		gas    = scope.Contract.Gas
 	)
-	if interpreter.evm.ChainRules().IsTangerineWhistle {
+	if !interpreter.cfg.IgnoreGas && interpreter.evm.ChainRules().IsTangerineWhistle {
 		gas -= gas / 64
 	}
 	// reuse size int for stackvalue
@@ -989,7 +989,9 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]
 	)
 
 	// Apply EIP150
-	gas -= gas / 64
+	if !interpreter.cfg.IgnoreGas {
+		gas -= gas / 64
+	}
 	scope.Contract.UseGas(gas, interpreter.evm.Config().Tracer, tracing.GasChangeCallContractCreation2)
 	// reuse size int for stackvalue
 	stackValue := size

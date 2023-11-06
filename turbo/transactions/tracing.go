@@ -199,7 +199,14 @@ func ExecuteTraceTx(
 	// Set the tracer hooks to the intra-block state before execute, so the OnLog hook may be set correctly.
 	ibs.SetHooks(tracer.Hooks)
 	// Run the transaction with tracing enabled.
-	evm := vm.NewEVM(blockCtx, txCtx, ibs, chainConfig, vm.Config{Tracer: tracer.Hooks, NoBaseFee: true})
+	vmConfig := vm.Config{
+		Tracer:    tracer.Hooks,
+		NoBaseFee: true,
+	}
+	if config != nil {
+		vmConfig.SentioTraceConfig = config.SentioTraceConfig
+	}
+	evm := vm.NewEVM(blockCtx, txCtx, ibs, chainConfig, vmConfig)
 	var refunds = true
 	if config != nil && config.NoRefunds != nil && *config.NoRefunds {
 		refunds = false

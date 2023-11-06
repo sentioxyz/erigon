@@ -469,6 +469,17 @@ func (st *StateTransition) TransitionDb(refunds bool, gasBailout bool) (result *
 	if err := st.preCheck(gasBailout); err != nil {
 		return nil, err
 	}
+	refund := uint64(0)
+	if st.evm.Config().Tracer != nil {
+		defer func() {
+			// pass actual refund to tracers
+			// won't affect actual execution since we are at the end of the tx
+			rawRefund := st.evm.IntraBlockState().GetRefund()
+			if rawRefund > refund {
+				st.evm.IntraBlockState().SubRefund(rawRefund - refund)
+			}
+		}()
+	}
 
 	msg := st.msg
 	sender := vm.AccountRef(msg.From())
@@ -495,19 +506,21 @@ func (st *StateTransition) TransitionDb(refunds bool, gasBailout bool) (result *
 	if overflow {
 		return nil, ErrGasUintOverflow
 	}
-	if st.gasRemaining < gas || st.gasRemaining < floorGas7623 {
-		return nil, fmt.Errorf("%w: have %d, want %d", ErrIntrinsicGas, st.gasRemaining, max(gas, floorGas7623))
+	if !st.evm.Config().IgnoreGas {
+		if st.gasRemaining < gas || st.gasRemaining < floorGas7623 {
+			return nil, fmt.Errorf("%w: have %d, want %d", ErrIntrinsicGas, st.gasRemaining, max(gas, floorGas7623))
+		}
 	}
-
 	verifiedAuthorities, err := st.verifyAuthorities(auths, contractCreation, rules.ChainID.String())
 	if err != nil {
 		return nil, err
 	}
-
-	if t := st.evm.Config().Tracer; t != nil && t.OnGasChange != nil {
-		t.OnGasChange(st.gasRemaining, st.gasRemaining-gas, tracing.GasChangeTxIntrinsicGas)
+	if !st.evm.Config().IgnoreGas {
+		if t := st.evm.Config().Tracer; t != nil && t.OnGasChange != nil {
+			t.OnGasChange(st.gasRemaining, st.gasRemaining-gas, tracing.GasChangeTxIntrinsicGas)
+		}
+		st.gasRemaining -= gas
 	}
-	st.gasRemaining -= gas
 
 	var bailout bool
 	// Gas bailout (for trace_call) should only be applied if there is not sufficient balance to perform value transfer
@@ -522,7 +535,7 @@ func (st *StateTransition) TransitionDb(refunds bool, gasBailout bool) (result *
 	}
 
 	// Check whether the init code size has been exceeded.
-	if isEIP3860 && contractCreation && len(st.data) > params.MaxInitCodeSize {
+	if !st.evm.Config().IgnoreCodeSizeLimit && isEIP3860 && contractCreation && len(st.data) > params.MaxInitCodeSize {
 		return nil, fmt.Errorf("%w: code size %v limit %v", ErrMaxInitCodeSizeExceeded, len(st.data), params.MaxInitCodeSize)
 	}
 
@@ -553,7 +566,7 @@ func (st *StateTransition) TransitionDb(refunds bool, gasBailout bool) (result *
 			refundQuotient = params.RefundQuotientEIP3529
 		}
 		gasUsed := st.gasUsed()
-		refund := min(gasUsed/refundQuotient, st.state.GetRefund())
+		refund = min(gasUsed/refundQuotient, st.state.GetRefund())
 		gasUsed = gasUsed - refund
 		if rules.IsPrague {
 			gasUsed = max(floorGas7623, gasUsed)
