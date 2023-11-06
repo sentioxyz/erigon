@@ -49,6 +49,7 @@ type Config struct {
 
 	ExtraEips []int // Additional EIPS that are to be enabled
 
+	common.SentioTraceConfig
 }
 
 func (vmConfig *Config) HasEip3860(rules *chain.Rules) bool {
@@ -102,6 +103,10 @@ func (ctx *ScopeContext) Caller() common.Address {
 // Address returns the address where this scope of execution is taking place.
 func (ctx *ScopeContext) Address() common.Address {
 	return ctx.Contract.Address()
+}
+
+func (ctx *ScopeContext) CodeAddress() *common.Address {
+	return ctx.Contract.CodeAddr
 }
 
 // CallValue returns the value supplied with this call.
@@ -219,6 +224,23 @@ func NewEVMInterpreter(evm *EVM, cfg Config) *EVMInterpreter {
 				// Disable it, so caller can check if it's activated or not
 				cfg.ExtraEips = append(cfg.ExtraEips[:i], cfg.ExtraEips[i+1:]...)
 				log.Error("EIP activation failed", "eip", eip, "err", err)
+			}
+		}
+	}
+
+	if cfg.IgnoreGas {
+		jt = copyJumpTable(jt)
+		for i, op := range jt {
+			opCode := OpCode(i)
+			// retain call costs to prevent call stack from going too deep
+			// some contracts use a loop to burn gas
+			// if all codes in the loop have zero cost, it will run forever
+			if opCode == CALL || opCode == STATICCALL || opCode == CALLCODE || opCode == DELEGATECALL || opCode == GAS {
+				continue
+			}
+			op.constantGas = 0
+			op.dynamicGas = func(*EVM, *Contract, *Stack, *Memory, uint64) (uint64, error) {
+				return 0, nil
 			}
 		}
 	}
