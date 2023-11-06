@@ -26,6 +26,7 @@ import (
 
 	"github.com/erigontech/erigon-lib/chain"
 	libcommon "github.com/erigontech/erigon-lib/common"
+	"github.com/erigontech/erigon-lib/common/hexutility"
 	"github.com/erigontech/erigon-lib/common/math"
 	"github.com/erigontech/erigon-lib/log/v3"
 	"github.com/erigontech/erigon/core/tracing"
@@ -47,6 +48,11 @@ type Config struct {
 
 	ExtraEips []int // Additional EIPS that are to be enabled
 
+	CreationCodeOverrides map[libcommon.Address]hexutility.Bytes
+	CreateAddressOverride *libcommon.Address
+	MockFunctions         map[libcommon.Address]map[string]hexutility.Bytes
+	IgnoreGas             bool
+	IgnoreCodeSizeLimit   bool
 }
 
 var pool = sync.Pool{
@@ -165,6 +171,23 @@ func NewEVMInterpreter(evm *EVM, cfg Config) *EVMInterpreter {
 				// Disable it, so caller can check if it's activated or not
 				cfg.ExtraEips = append(cfg.ExtraEips[:i], cfg.ExtraEips[i+1:]...)
 				log.Error("EIP activation failed", "eip", eip, "err", err)
+			}
+		}
+	}
+
+	if cfg.IgnoreGas {
+		jt = copyJumpTable(jt)
+		for i, op := range jt {
+			opCode := OpCode(i)
+			// retain call costs to prevent call stack from going too deep
+			// some contracts use a loop to burn gas
+			// if all codes in the loop have zero cost, it will run forever
+			if opCode == CALL || opCode == STATICCALL || opCode == CALLCODE || opCode == DELEGATECALL || opCode == GAS {
+				continue
+			}
+			op.constantGas = 0
+			op.dynamicGas = func(*EVM, *Contract, *stack.Stack, *Memory, uint64) (uint64, error) {
+				return 0, nil
 			}
 		}
 	}

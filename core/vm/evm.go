@@ -27,6 +27,7 @@ import (
 
 	"github.com/erigontech/erigon-lib/chain"
 	libcommon "github.com/erigontech/erigon-lib/common"
+	"github.com/erigontech/erigon-lib/common/hexutility"
 	"github.com/erigontech/erigon-lib/common/u256"
 	"github.com/erigontech/erigon-lib/crypto"
 	"github.com/erigontech/erigon-lib/trie"
@@ -211,12 +212,24 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr libcommon.Address, inp
 
 	snapshot := evm.intraBlockState.Snapshot()
 
+	mock := false
+	var mockOutput []byte
+	if len(evm.config.MockFunctions) > 0 && (typ == CALL || typ == CALLCODE) && len(input) >= 4 {
+		if mocks, ok := evm.config.MockFunctions[addr]; ok {
+			sig := hexutility.Encode(input[:4])
+			if output, ok := mocks[sig]; ok {
+				mock = true
+				mockOutput = output
+			}
+		}
+	}
+
 	if typ == CALL {
 		exist, err := evm.intraBlockState.Exist(addr)
 		if err != nil {
 			return nil, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
 		}
-		if !exist {
+		if !exist && !mock {
 			if !isPrecompile && evm.chainRules.IsSpuriousDragon && value.IsZero() {
 				if evm.config.Debug {
 					v := value
@@ -269,7 +282,9 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr libcommon.Address, inp
 	}
 
 	// It is allowed to call precompiles, even via delegatecall
-	if isPrecompile {
+	if mock {
+		ret, err = mockOutput, nil
+	} else if isPrecompile {
 		ret, gas, err = RunPrecompiledContract(p, input, gas)
 	} else if len(code) == 0 {
 		// If the account has no code, we can abort here
@@ -381,6 +396,17 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	var gasConsumption uint64
 	depth := evm.interpreter.Depth()
 
+	if evm.config.CreateAddressOverride != nil {
+		address = *evm.config.CreateAddressOverride
+	}
+	if evm.config.CreationCodeOverrides != nil {
+		if code, ok := evm.config.CreationCodeOverrides[address]; ok {
+			codeAndHash.code = code
+			codeAndHash.hash = libcommon.Hash{}
+			_ = codeAndHash.Hash()
+		}
+	}
+
 	if evm.config.Debug {
 		if depth == 0 {
 			evm.config.Tracer.CaptureStart(evm, caller.Address(), address, false /* precompile */, true /* create */, codeAndHash.code, gasRemaining, value, nil)
@@ -427,18 +453,20 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	if evm.chainRules.IsBerlin {
 		evm.intraBlockState.AddAddressToAccessList(address)
 	}
-	// Ensure there's no existing contract already at the designated address
-	contractHash, err := evm.intraBlockState.ResolveCodeHash(address)
-	if err != nil {
-		return nil, libcommon.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
-	}
-	nonce, err := evm.intraBlockState.GetNonce(address)
-	if err != nil {
-		return nil, libcommon.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
-	}
-	if nonce != 0 || (contractHash != (libcommon.Hash{}) && contractHash != trie.EmptyCodeHash) {
-		err = ErrContractAddressCollision
-		return nil, libcommon.Address{}, 0, err
+	if evm.config.CreateAddressOverride == nil {
+		// Ensure there's no existing contract already at the designated address
+		contractHash, err := evm.intraBlockState.ResolveCodeHash(address)
+		if err != nil {
+			return nil, libcommon.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
+		}
+		nonce, err := evm.intraBlockState.GetNonce(address)
+		if err != nil {
+			return nil, libcommon.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
+		}
+		if nonce != 0 || (contractHash != (libcommon.Hash{}) && contractHash != trie.EmptyCodeHash) {
+			err = ErrContractAddressCollision
+			return nil, libcommon.Address{}, 0, err
+		}
 	}
 	// Create a new account on the state
 	snapshot := evm.intraBlockState.Snapshot()
@@ -460,7 +488,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	ret, err = run(evm, contract, nil, false)
 
 	// EIP-170: Contract code size limit
-	if err == nil && evm.chainRules.IsSpuriousDragon && len(ret) > evm.maxCodeSize() {
+	if err == nil && !evm.config.IgnoreCodeSizeLimit && evm.chainRules.IsSpuriousDragon && len(ret) > evm.maxCodeSize() {
 		// Gnosis Chain prior to Shanghai didn't have EIP-170 enabled,
 		// but EIP-3860 (part of Shanghai) requires EIP-170.
 		if !evm.chainRules.IsAura || evm.config.HasEip3860(evm.chainRules) {
@@ -478,6 +506,9 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	// by the error checking condition below.
 	if err == nil {
 		createDataGas := uint64(len(ret)) * params.CreateDataGas
+		if evm.config.IgnoreGas {
+			createDataGas = 0
+		}
 		if contract.UseGas(createDataGas, tracing.GasChangeCallCodeStorage) {
 			evm.intraBlockState.SetCode(address, ret)
 		} else {
