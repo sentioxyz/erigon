@@ -94,6 +94,7 @@ import (
 	// Force-load native and js packages, to trigger registration
 	_ "github.com/erigontech/erigon/eth/tracers/js"
 	_ "github.com/erigontech/erigon/eth/tracers/native"
+	_ "github.com/erigontech/erigon/eth/tracers/sentio"
 )
 
 var rootCmd = &cobra.Command{
