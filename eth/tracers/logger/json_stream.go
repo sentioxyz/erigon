@@ -17,6 +17,7 @@
 package logger
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"sort"
@@ -47,6 +48,10 @@ type JsonStreamLogger struct {
 	output    []byte //nolint
 	err       error  //nolint
 	env       *vm.EVM
+
+	prevMem       [][]byte
+	prevMemWindow int
+	prevMemIdx    int
 }
 
 // NewStructLogger returns a new logger
@@ -59,6 +64,9 @@ func NewJsonStreamLogger(cfg *LogConfig, ctx context.Context, stream *jsoniter.S
 	}
 	if cfg != nil {
 		logger.cfg = *cfg
+		logger.prevMemWindow = cfg.MemoryCompressionWindow
+		logger.prevMemIdx = 0
+		logger.prevMem = make([][]byte, cfg.MemoryCompressionWindow)
 	}
 	return logger
 }
@@ -159,16 +167,43 @@ func (l *JsonStreamLogger) CaptureState(pc uint64, op vm.OpCode, gas, cost uint6
 	}
 	if !l.cfg.DisableMemory {
 		memData := memory.Data()
-		l.stream.WriteMore()
-		l.stream.WriteObjectField("memory")
-		l.stream.WriteArrayStart()
-		for i := 0; i+32 <= len(memData); i += 32 {
-			if i > 0 {
-				l.stream.WriteMore()
+		foundEq := false
+		if l.prevMemWindow > 0 {
+			i := l.prevMemIdx
+			for dist := 1; dist <= l.prevMemWindow; dist++ {
+				if i--; i < 0 {
+					i = l.prevMemWindow - 1
+				}
+				if len(l.prevMem[i]) == len(memData) && bytes.Equal(l.prevMem[i], memData) {
+					foundEq = true
+					l.stream.WriteMore()
+					l.stream.WriteObjectField("meq")
+					l.stream.WriteInt(dist)
+					break
+				}
 			}
-			l.stream.WriteString(string(l.hexEncodeBuf[0:hex.Encode(l.hexEncodeBuf[:], memData[i:i+32])]))
+			if l.prevMemIdx++; l.prevMemIdx == l.prevMemWindow {
+				l.prevMemIdx = 0
+			}
+			if foundEq {
+				l.prevMem[l.prevMemIdx] = l.prevMem[i]
+			} else {
+				l.prevMem[l.prevMemIdx] = make([]byte, len(memData))
+				copy(l.prevMem[l.prevMemIdx], memData)
+			}
 		}
-		l.stream.WriteArrayEnd()
+		if !foundEq {
+			l.stream.WriteMore()
+			l.stream.WriteObjectField("memory")
+			l.stream.WriteArrayStart()
+			for i := 0; i+32 <= len(memData); i += 32 {
+				if i > 0 {
+					l.stream.WriteMore()
+				}
+				l.stream.WriteString(string(l.hexEncodeBuf[0:hex.Encode(l.hexEncodeBuf[:], memData[i:i+32])]))
+			}
+			l.stream.WriteArrayEnd()
+		}
 	}
 	if outputStorage {
 		l.stream.WriteMore()
