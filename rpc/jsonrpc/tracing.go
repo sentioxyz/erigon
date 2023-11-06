@@ -298,6 +298,12 @@ func (api *DebugAPIImpl) TraceTransaction(ctx context.Context, hash common.Hash,
 		return err
 	}
 
+	if config != nil && config.StateOverrides != nil {
+		if err := config.StateOverrides.Override(ibs); err != nil {
+			return fmt.Errorf("override state: %v", err)
+		}
+	}
+
 	if isBorStateSyncTxn {
 		stateSyncEvents, err := api.bridgeReader.Events(ctx, block.Hash(), blockNum)
 		if err != nil {
@@ -324,6 +330,9 @@ func (api *DebugAPIImpl) TraceTransaction(ctx context.Context, hash common.Hash,
 	msg, txCtx, err := transactions.ComputeTxContext(ibs, engine, rules, signer, block, chainConfig, txnIndex)
 	if err != nil {
 		return err
+	}
+	if config != nil && config.TxOriginOverride != nil {
+		txCtx.Origin = *config.TxOriginOverride
 	}
 
 	// Trace the transaction and return
@@ -418,6 +427,9 @@ func (api *DebugAPIImpl) TraceCall(ctx context.Context, args ethapi.CallArgs, bl
 		}
 	}
 	txCtx := core.NewEVMTxContext(msg)
+	if config != nil && config.TxOriginOverride != nil {
+		txCtx.Origin = *config.TxOriginOverride
+	}
 	// Trace the transaction and return
 	_, err = transactions.TraceTx(ctx, engine, transaction, msg, blockCtx, txCtx, hash, 0, ibs, config, chainConfig, stream, api.evmCallTimeout)
 	return err
@@ -537,7 +549,7 @@ func (api *DebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bundle, si
 		// do not reset ibs, because we want to keep the overrides and state change
 		// ibs.Reset()
 		for txnIndex, txn := range bundle.Transactions {
-			if txn.Gas == nil || *(txn.Gas) == 0 {
+			if txn.Gas == nil {
 				txn.Gas = (*hexutil.Uint64)(&api.GasCap)
 			}
 			msg, err := txn.ToMessage(api.GasCap, blockCtx.BaseFee)
@@ -549,6 +561,9 @@ func (api *DebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bundle, si
 				return err
 			}
 			txCtx = core.NewEVMTxContext(msg)
+			if config.TxOriginOverride != nil {
+				txCtx.Origin = *config.TxOriginOverride
+			}
 			ibs := evm.IntraBlockState()
 			ibs.SetTxContext(blockCtx.BlockNumber, txnIndex)
 			_, err = transactions.TraceTx(ctx, api.engine(), transaction, msg, blockCtx, txCtx, header.Hash(), txnIndex, evm.IntraBlockState(), config, chainConfig, stream, api.evmCallTimeout)

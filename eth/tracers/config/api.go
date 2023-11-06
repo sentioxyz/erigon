@@ -22,6 +22,7 @@ package config
 import (
 	"encoding/json"
 
+	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/hexutil"
 	"github.com/erigontech/erigon/eth/tracers/logger"
 	"github.com/erigontech/erigon/rpc/ethapi"
@@ -40,4 +41,6 @@ type TraceConfig struct {
 
 	BorTraceEnabled *bool
 	TxIndex         *hexutil.Uint
+
+	libcommon.SentioTraceConfig
 }
