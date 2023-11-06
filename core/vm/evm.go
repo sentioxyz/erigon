@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/erigontech/erigon-lib/common/hexutil"
 	"github.com/holiman/uint256"
 
 	"github.com/erigontech/erigon-lib/common"
@@ -158,9 +159,25 @@ func (evm *EVM) Interpreter() Interpreter {
 	return evm.interpreter
 }
 
+type contractRef struct {
+	addr common.Address
+}
+
+func (c contractRef) Address() common.Address {
+	return c.addr
+}
+
 func (evm *EVM) call(typ OpCode, caller ContractRef, addr common.Address, input []byte, gas uint64, value *uint256.Int, bailout bool) (ret []byte, leftOverGas uint64, err error) {
 	if evm.abort.Load() {
 		return ret, leftOverGas, nil
+	}
+	if len(evm.config.CallerOverride) > 0 && (typ == CALL || typ == CALLCODE) && len(input) >= 4 {
+		if overrides, ok := evm.config.CallerOverride[addr]; ok {
+			sig := hexutil.Encode(input[:4])
+			if newCaller, ok := overrides[sig]; ok {
+				caller = contractRef{addr: newCaller}
+			}
+		}
 	}
 
 	depth := evm.interpreter.Depth()
@@ -214,12 +231,24 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr common.Address, input 
 
 	snapshot := evm.intraBlockState.Snapshot()
 
+	mock := false
+	var mockOutput []byte
+	if len(evm.config.MockFunctions) > 0 && (typ == CALL || typ == CALLCODE) && len(input) >= 4 {
+		if mocks, ok := evm.config.MockFunctions[addr]; ok {
+			sig := hexutil.Encode(input[:4])
+			if output, ok := mocks[sig]; ok {
+				mock = true
+				mockOutput = output
+			}
+		}
+	}
+
 	if typ == CALL {
 		exist, err := evm.intraBlockState.Exist(addr)
 		if err != nil {
 			return nil, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
 		}
-		if !exist {
+		if !exist && !mock {
 			if !isPrecompile && evm.chainRules.IsSpuriousDragon && value.IsZero() {
 				return nil, gas, nil
 			}
@@ -235,7 +264,9 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr common.Address, input 
 	}
 
 	// It is allowed to call precompiles, even via delegatecall
-	if isPrecompile {
+	if mock {
+		ret, err = mockOutput, nil
+	} else if isPrecompile {
 		ret, gas, err = RunPrecompiledContract(p, input, gas, evm.Config().Tracer)
 	} else if len(code) == 0 {
 		// If the account has no code, we can abort here
@@ -347,6 +378,22 @@ func (evm *EVM) OverlayCreate(caller ContractRef, codeAndHash *codeAndHash, gas 
 func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemaining uint64, value *uint256.Int, address common.Address, typ OpCode, incrementNonce bool, bailout bool) (ret []byte, createAddress common.Address, leftOverGas uint64, err error) {
 	depth := evm.interpreter.Depth()
 
+	if evm.config.CreateAddressOverride != nil {
+		address = *evm.config.CreateAddressOverride
+	}
+	if len(evm.config.CreationOverrides) > 0 {
+		if override, ok := evm.config.CreationOverrides[address]; ok {
+			if override.NewAddress != nil {
+				address = *override.NewAddress
+			}
+			if override.NewCode != nil {
+				codeAndHash.code = override.NewCode
+				codeAndHash.hash = common.Hash{}
+				_ = codeAndHash.Hash()
+			}
+		}
+	}
+
 	if evm.Config().Tracer != nil {
 		evm.captureBegin(depth, typ, caller.Address(), address, false, codeAndHash.code, gasRemaining, value, nil)
 		defer func(startGas uint64) {
@@ -386,25 +433,27 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	if evm.chainRules.IsBerlin {
 		evm.intraBlockState.AddAddressToAccessList(address)
 	}
-	// Ensure there's no existing contract already at the designated address
-	contractHash, err := evm.intraBlockState.ResolveCodeHash(address)
-	if err != nil {
-		return nil, common.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
-	}
-	nonce, err := evm.intraBlockState.GetNonce(address)
-	if err != nil {
-		return nil, common.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
-	}
-	hasStorage, err := evm.intraBlockState.HasStorage(address)
-	if err != nil {
-		return nil, common.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
-	}
-	if nonce != 0 || (contractHash != (common.Hash{}) && contractHash != empty.CodeHash) || hasStorage {
-		err = ErrContractAddressCollision
-		if evm.config.Tracer != nil && evm.config.Tracer.OnGasChange != nil {
-			evm.Config().Tracer.OnGasChange(gasRemaining, 0, tracing.GasChangeCallFailedExecution)
+	if evm.config.CreateAddressOverride == nil {
+		// Ensure there's no existing contract already at the designated address
+		contractHash, err := evm.intraBlockState.ResolveCodeHash(address)
+		if err != nil {
+			return nil, common.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
 		}
-		return nil, common.Address{}, 0, err
+		nonce, err := evm.intraBlockState.GetNonce(address)
+		if err != nil {
+			return nil, common.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
+		}
+		hasStorage, err := evm.intraBlockState.HasStorage(address)
+		if err != nil {
+			return nil, common.Address{}, 0, fmt.Errorf("%w: %w", ErrIntraBlockStateFailed, err)
+		}
+		if nonce != 0 || (contractHash != (common.Hash{}) && contractHash != empty.CodeHash) || hasStorage {
+			err = ErrContractAddressCollision
+			if evm.config.Tracer != nil && evm.config.Tracer.OnGasChange != nil {
+				evm.Config().Tracer.OnGasChange(gasRemaining, 0, tracing.GasChangeCallFailedExecution)
+			}
+			return nil, common.Address{}, 0, err
+		}
 	}
 	// Create a new account on the state
 	snapshot := evm.intraBlockState.Snapshot()
@@ -426,7 +475,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	ret, err = evm.interpreter.Run(contract, nil, false)
 
 	// EIP-170: Contract code size limit
-	if err == nil && evm.chainRules.IsSpuriousDragon && len(ret) > evm.maxCodeSize() {
+	if err == nil && !evm.config.IgnoreCodeSizeLimit && evm.chainRules.IsSpuriousDragon && len(ret) > evm.maxCodeSize() {
 		// Gnosis Chain prior to Shanghai didn't have EIP-170 enabled,
 		// but EIP-3860 (part of Shanghai) requires EIP-170.
 		if !evm.chainRules.IsAura || evm.config.HasEip3860(evm.chainRules) {
@@ -444,6 +493,9 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	// by the error checking condition below.
 	if err == nil {
 		createDataGas := uint64(len(ret)) * params.CreateDataGas
+		if evm.config.IgnoreGas {
+			createDataGas = 0
+		}
 		if contract.UseGas(createDataGas, evm.Config().Tracer, tracing.GasChangeCallCodeStorage) {
 			evm.intraBlockState.SetCode(address, ret)
 		} else {

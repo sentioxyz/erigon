@@ -125,7 +125,7 @@ func convertSubPoolType(t SubPoolType) txpoolproto.AllReply_TxnType {
 	case QueuedSubPool:
 		return txpoolproto.AllReply_QUEUED
 	default:
-		panic("unknown")
+		panic(fmt.Sprintf("unknown SubPoolType %d", t))
 	}
 }
 func (s *GrpcServer) All(ctx context.Context, _ *txpoolproto.AllRequest) (*txpoolproto.AllReply, error) {
@@ -137,6 +137,10 @@ func (s *GrpcServer) All(ctx context.Context, _ *txpoolproto.AllRequest) (*txpoo
 	reply := &txpoolproto.AllReply{}
 	reply.Txs = make([]*txpoolproto.AllReply_Tx, 0, 32)
 	s.txPool.deprecatedForEach(ctx, func(rlp []byte, sender common.Address, t SubPoolType) {
+		if t == 0 {
+			log.Warn("txPool.deprecatedForEach returned SubPoolType=0, skipping")
+			return
+		}
 		reply.Txs = append(reply.Txs, &txpoolproto.AllReply_Tx{
 			Sender:  gointerfaces.ConvertAddressToH160(sender),
 			TxnType: convertSubPoolType(t),
