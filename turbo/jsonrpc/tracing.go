@@ -328,6 +328,12 @@ func (api *PrivateDebugAPIImpl) TraceTransaction(ctx context.Context, hash commo
 		return err
 	}
 
+	if config != nil && config.StateOverrides != nil {
+		if err := config.StateOverrides.Override(ibs); err != nil {
+			return fmt.Errorf("override state: %v", err)
+		}
+	}
+
 	if isBorStateSyncTxn {
 		stateSyncEvents, err := api.stateSyncEvents(ctx, tx, block.Hash(), blockNum, chainConfig)
 		if err != nil {
@@ -426,6 +432,9 @@ func (api *PrivateDebugAPIImpl) TraceCall(ctx context.Context, args ethapi.CallA
 
 	blockCtx := transactions.NewEVMBlockContext(engine, header, blockNrOrHash.RequireCanonical, dbtx, api._blockReader, chainConfig)
 	txCtx := core.NewEVMTxContext(msg)
+	if config != nil && config.TxOriginOverride != nil {
+		txCtx.Origin = *config.TxOriginOverride
+	}
 	// Trace the transaction and return
 	_, err = transactions.TraceTx(ctx, engine, msg, blockCtx, txCtx, hash, 0, ibs, config, chainConfig, stream, api.evmCallTimeout)
 	return err
@@ -552,31 +561,38 @@ func (api *PrivateDebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bun
 		stream.WriteArrayStart()
 		// first change blockContext
 		blockHeaderOverride(&blockCtx, bundle.BlockOverride, overrideBlockHash)
-		ibs.Reset()
+		//ibs.Reset()
 		for txnIndex, txn := range bundle.Transactions {
-			if txn.Gas == nil || *(txn.Gas) == 0 {
+			if txn.Gas == nil {
 				txn.Gas = (*hexutil.Uint64)(&api.GasCap)
 			}
 			msg, err := txn.ToMessage(api.GasCap, blockCtx.BaseFee)
 			if err != nil {
 				stream.WriteArrayEnd()
 				stream.WriteArrayEnd()
+				stream.WriteMore()
+				stream.WriteObjectField("resultHack")
 				return err
 			}
 			txCtx = core.NewEVMTxContext(msg)
-			ibs.SetTxContext(txnIndex)
+			if config.TxOriginOverride != nil {
+				txCtx.Origin = *config.TxOriginOverride
+			}
+			ibs.SetTxContext(txnIndex + transactionIndex)
+			if txnIndex > 0 {
+				stream.WriteMore()
+			}
 			_, err = transactions.TraceTx(ctx, api.engine(), msg, blockCtx, txCtx, block.Hash(), txnIndex, evm.IntraBlockState(), config, chainConfig, stream, api.evmCallTimeout)
+
 			if err != nil {
 				stream.WriteArrayEnd()
 				stream.WriteArrayEnd()
+				stream.WriteMore()
+				stream.WriteObjectField("resultHack")
 				return err
 			}
 
 			_ = ibs.FinalizeTx(rules, state.NewNoopWriter())
-
-			if txnIndex < len(bundle.Transactions)-1 {
-				stream.WriteMore()
-			}
 		}
 		stream.WriteArrayEnd()
 
