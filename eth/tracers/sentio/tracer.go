@@ -536,6 +536,25 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 			StorageValue:   &val,
 		})
 		t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
+	case vm.TLOAD, vm.TSTORE:
+		if !t.config.WithStorage {
+			break
+		}
+		caller := scope.Contract.Address()
+		slot := libcommon.Hash(scope.Stack.Peek().Bytes32())
+		var val libcommon.Hash
+		if op == vm.TLOAD {
+			v := t.env.IntraBlockState().GetTransientState(caller, slot)
+			val = v.Bytes32()
+		} else {
+			val = scope.Stack.Back(1).Bytes32()
+		}
+		trace := mergeBase(Trace{
+			StorageAddress: &caller,
+			StorageSlot:    &slot,
+			StorageValue:   &val,
+		})
+		t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
 	case vm.KECCAK256:
 		if !t.config.WithStorageKeys {
 			break
