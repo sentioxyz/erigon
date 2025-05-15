@@ -362,6 +362,9 @@ func (api *PrivateDebugAPIImpl) TraceTransaction(ctx context.Context, hash commo
 		stream.WriteNil()
 		return err
 	}
+	if config != nil && config.TxOriginOverride != nil {
+		txCtx.Origin = *config.TxOriginOverride
+	}
 
 	// Trace the transaction and return
 	_, err = transactions.TraceTx(ctx, engine, msg, blockCtx, txCtx, block.Hash(), txnIndex, ibs, config, chainConfig, stream, api.evmCallTimeout)

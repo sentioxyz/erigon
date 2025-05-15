@@ -194,6 +194,7 @@ func ExecuteTraceTx(
 		vmConfig.CreateAddressOverride = config.CreateAddressOverride
 		vmConfig.CreationCodeOverrides = config.CreationCodeOverrides
 		vmConfig.MockFunctions = config.MockFunctions
+		vmConfig.CallerOverride = config.CallerOverride
 		if config.IgnoreCodeSizeLimit != nil {
 			vmConfig.IgnoreCodeSizeLimit = *config.IgnoreCodeSizeLimit
 		}
