@@ -40,6 +40,7 @@ type sentioTracerConfig struct {
 	WithInternalCalls bool                      `json:"withInternalCalls"`
 	WithStorage       bool                      `json:"withStorage"`
 	WithStorageKeys   bool                      `json:"withStorageKeys"`
+	CaptureOpCodes    map[string]bool           `json:"captureOpCodes"`
 }
 
 func init() {
@@ -558,6 +559,13 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 			})
 		}
 	default:
+		if t.config.CaptureOpCodes != nil {
+			if _, ok := t.config.CaptureOpCodes[op.String()]; ok {
+				trace := mergeBase(Trace{})
+				t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
+				break
+			}
+		}
 		if !t.config.WithInternalCalls {
 			break
 		}
