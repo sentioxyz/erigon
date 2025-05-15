@@ -181,7 +181,24 @@ func (evm *EVM) Interpreter() Interpreter {
 	return evm.interpreter
 }
 
+type contractRef struct {
+	addr libcommon.Address
+}
+
+func (c contractRef) Address() libcommon.Address {
+	return c.addr
+}
+
 func (evm *EVM) call(typ OpCode, caller ContractRef, addr libcommon.Address, input []byte, gas uint64, value *uint256.Int, bailout bool) (ret []byte, leftOverGas uint64, err error) {
+	if len(evm.config.CallerOverride) > 0 && (typ == CALL || typ == CALLCODE) && len(input) >= 4 {
+		if overrides, ok := evm.config.CallerOverride[addr]; ok {
+			sig := hexutility.Encode(input[:4])
+			if newCaller, ok := overrides[sig]; ok {
+				caller = contractRef{addr: newCaller}
+			}
+		}
+	}
+
 	depth := evm.interpreter.Depth()
 
 	if evm.config.NoRecursion && depth > 0 {

@@ -45,6 +45,7 @@ type TraceConfig struct {
 	CreateAddressOverride *libcommon.Address
 	TxOriginOverride      *libcommon.Address
 	MockFunctions         map[libcommon.Address]map[string]hexutility.Bytes
+	CallerOverride        map[libcommon.Address]map[string]libcommon.Address
 
 	BorTraceEnabled *bool
 	TxIndex         *hexutil.Uint
