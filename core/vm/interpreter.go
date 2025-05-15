@@ -51,6 +51,7 @@ type Config struct {
 	CreationCodeOverrides map[libcommon.Address]hexutility.Bytes
 	CreateAddressOverride *libcommon.Address
 	MockFunctions         map[libcommon.Address]map[string]hexutility.Bytes
+	CallerOverride        map[libcommon.Address]map[string]libcommon.Address
 	IgnoreGas             bool
 	IgnoreCodeSizeLimit   bool
 }
