@@ -26,7 +26,6 @@ import (
 
 	"github.com/erigontech/erigon-lib/chain"
 	libcommon "github.com/erigontech/erigon-lib/common"
-	"github.com/erigontech/erigon-lib/common/hexutility"
 	"github.com/erigontech/erigon-lib/common/math"
 	"github.com/erigontech/erigon-lib/log/v3"
 	"github.com/erigontech/erigon/core/tracing"
@@ -48,12 +47,7 @@ type Config struct {
 
 	ExtraEips []int // Additional EIPS that are to be enabled
 
-	CreationCodeOverrides map[libcommon.Address]hexutility.Bytes
-	CreateAddressOverride *libcommon.Address
-	MockFunctions         map[libcommon.Address]map[string]hexutility.Bytes
-	CallerOverride        map[libcommon.Address]map[string]libcommon.Address
-	IgnoreGas             bool
-	IgnoreCodeSizeLimit   bool
+	libcommon.SentioTraceConfig
 }
 
 var pool = sync.Pool{
