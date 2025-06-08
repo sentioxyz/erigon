@@ -418,14 +418,18 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	if evm.config.CreateAddressOverride != nil {
 		address = *evm.config.CreateAddressOverride
 	}
-	if evm.config.CreationCodeOverrides != nil {
-		if code, ok := evm.config.CreationCodeOverrides[address]; ok {
-			codeAndHash.code = code
-			codeAndHash.hash = libcommon.Hash{}
-			_ = codeAndHash.Hash()
+	if len(evm.config.CreationOverrides) > 0 {
+		if override, ok := evm.config.CreationOverrides[address]; ok {
+			if override.NewAddress != nil {
+				address = *override.NewAddress
+			}
+			if override.NewCode != nil {
+				codeAndHash.code = *override.NewCode
+				codeAndHash.hash = libcommon.Hash{}
+				_ = codeAndHash.Hash()
+			}
 		}
 	}
-
 	if evm.config.Debug {
 		if depth == 0 {
 			evm.config.Tracer.CaptureStart(evm, caller.Address(), address, false /* precompile */, true /* create */, codeAndHash.code, gasRemaining, value, nil)
