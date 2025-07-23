@@ -130,6 +130,7 @@ type sentioTracer struct {
 	functionMap map[string]map[uint64]functionInfo
 	callMap     map[string]map[uint64]bool
 	receipt     Receipt
+	refund      uint64
 
 	previousJump *Trace
 	index        int
@@ -156,6 +157,7 @@ func (t *sentioTracer) CaptureTxEnd(restGas uint64) {
 		// It's possible that we can't correctly locate the PC that match the entry function (check why), in this case we need to 0 for the user
 		t.callstack[0].StartIndex = 0
 	}
+	t.refund = t.env.IntraBlockState().GetRefund()
 }
 
 func (t *sentioTracer) CaptureStart(env *vm.EVM, from libcommon.Address, to libcommon.Address, precompile bool, create bool, input []byte, gas uint64, value *uint256.Int, code []byte) {
@@ -610,10 +612,12 @@ func (t *sentioTracer) GetResult() (json.RawMessage, error) {
 		Trace
 		TracerConfig *sentioTracerConfig `json:"tracerConfig,omitempty"`
 		Receipt      Receipt             `json:"receipt"`
+		Refund       hexutil.Uint64      `json:"refund"`
 	}
 	root := RootTrace{
 		Trace:   t.callstack[0],
 		Receipt: t.receipt,
+		Refund:  hexutil.Uint64(t.refund),
 	}
 
 	if t.config.Debug {
