@@ -61,6 +61,7 @@ type Trace struct {
 	Gas hexutil.Uint64 `json:"gas"`
 	// Gas for the entire call
 	GasUsed hexutil.Uint64 `json:"gasUsed"`
+	Refund  hexutil.Uint64 `json:"refund"`
 
 	From *libcommon.Address `json:"from,omitempty"`
 	// Used by call
@@ -318,6 +319,7 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		trace.Gas = hexutil.Uint64(gas)
 		trace.StartIndex = t.index - 1
 		trace.EndIndex = t.index
+		trace.Refund = hexutil.Uint64(t.env.IntraBlockState().GetRefund())
 
 		// Assume it's single instruction, adjust it for jump and call
 		trace.GasUsed = hexutil.Uint64(cost)
@@ -578,6 +580,9 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 			})
 		}
 	default:
+		refund := t.callstack[len(t.callstack)-1].Refund.Uint64() + t.env.IntraBlockState().GetRefund()
+		t.callstack[len(t.callstack)-1].Refund = hexutil.Uint64(refund)
+
 		if t.config.CaptureOpCodes != nil {
 			if _, ok := t.config.CaptureOpCodes[op.String()]; ok {
 				trace := mergeBase(Trace{})
