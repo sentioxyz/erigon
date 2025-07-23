@@ -343,9 +343,16 @@ func (st *StateTransition) TransitionDb(refunds bool, gasBailout bool) (*evmtype
 	if err := st.preCheck(gasBailout); err != nil {
 		return nil, err
 	}
+	refund := uint64(0)
 	if st.evm.Config().Debug {
 		st.evm.Config().Tracer.CaptureTxStart(st.initialGas)
 		defer func() {
+			// pass actual refund to tracers
+			// won't affect actual execution since we are at the end of the tx
+			rawRefund := st.evm.IntraBlockState().GetRefund()
+			if rawRefund > refund {
+				st.evm.IntraBlockState().SubRefund(rawRefund - refund)
+			}
 			st.evm.Config().Tracer.CaptureTxEnd(st.gasRemaining)
 		}()
 	}
@@ -508,7 +515,7 @@ func (st *StateTransition) TransitionDb(refunds bool, gasBailout bool) (*evmtype
 			refundQuotient = params.RefundQuotientEIP3529
 		}
 		gasUsed := st.gasUsed()
-		refund := min(gasUsed/refundQuotient, st.state.GetRefund())
+		refund = min(gasUsed/refundQuotient, st.state.GetRefund())
 		gasUsed = gasUsed - refund
 		if rules.IsPrague {
 			gasUsed = max(floorGas7623, gasUsed)
