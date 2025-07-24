@@ -567,8 +567,6 @@ func (api *PrivateDebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bun
 			if err != nil {
 				stream.WriteArrayEnd()
 				stream.WriteArrayEnd()
-				stream.WriteMore()
-				stream.WriteObjectField("resultHack")
 				return err
 			}
 			txCtx = core.NewEVMTxContext(msg)
@@ -576,20 +574,18 @@ func (api *PrivateDebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bun
 				txCtx.Origin = *config.TxOriginOverride
 			}
 			ibs.SetTxContext(txnIndex + transactionIndex)
-			if txnIndex > 0 {
-				stream.WriteMore()
-			}
 			_, err = transactions.TraceTx(ctx, api.engine(), msg, blockCtx, txCtx, block.Hash(), txnIndex, evm.IntraBlockState(), config, chainConfig, stream, api.evmCallTimeout)
-
 			if err != nil {
 				stream.WriteArrayEnd()
 				stream.WriteArrayEnd()
-				stream.WriteMore()
-				stream.WriteObjectField("resultHack")
 				return err
 			}
 
 			_ = ibs.FinalizeTx(rules, state.NewNoopWriter())
+
+			if txnIndex < len(bundle.Transactions)-1 {
+				stream.WriteMore()
+			}
 		}
 		stream.WriteArrayEnd()
 
