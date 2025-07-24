@@ -40,7 +40,61 @@ type sentioTracerConfig struct {
 	WithInternalCalls bool                      `json:"withInternalCalls"`
 	WithStorage       bool                      `json:"withStorage"`
 	WithStorageKeys   bool                      `json:"withStorageKeys"`
-	CaptureOpCodes    map[string]bool           `json:"captureOpCodes"`
+	ExtraCaptureRules []string                  `json:"extraCaptureRules"`
+}
+
+func newSentioTracer(name string, ctx *tracers.Context, cfg json.RawMessage) (tracers.Tracer, error) {
+	if name != "sentioTracer" {
+		return nil, errors.New("no tracer found")
+	}
+
+	var config sentioTracerConfig
+	var extraCaptureRules []*Expr
+	functionMap := map[string]map[uint64]functionInfo{}
+	callMap := map[string]map[uint64]bool{}
+
+	if cfg != nil {
+		if err := json.Unmarshal(cfg, &config); err != nil {
+			return nil, err
+		}
+
+		for address, functions := range config.Functions {
+			checkSumAddress := libcommon.HexToAddress(address).String()
+			functionMap[checkSumAddress] = make(map[uint64]functionInfo)
+
+			for _, function := range functions {
+				function.address = checkSumAddress
+				functionMap[checkSumAddress][function.Pc] = function
+			}
+		}
+
+		for address, calls := range config.Calls {
+			checkSumAddress := libcommon.HexToAddress(address).String()
+			callMap[checkSumAddress] = make(map[uint64]bool)
+
+			for _, call := range calls {
+				callMap[checkSumAddress][call] = true
+			}
+		}
+
+		for _, rule := range config.ExtraCaptureRules {
+			expr, err := ParseExpr(rule)
+			if err != nil {
+				return nil, err
+			}
+			extraCaptureRules = append(extraCaptureRules, expr)
+		}
+
+		log.Info(fmt.Sprintf("create sentioTracer config with %d functions, %d calls, %d capture rules", len(functionMap), len(callMap), len(extraCaptureRules)))
+	}
+
+	return &sentioTracer{
+		config:            config,
+		functionMap:       functionMap,
+		callMap:           callMap,
+		entryPc:           map[uint64]bool{},
+		extraCaptureRules: extraCaptureRules,
+	}, nil
 }
 
 func init() {
@@ -98,6 +152,11 @@ type Trace struct {
 	// Only used by root
 	Traces []Trace `json:"traces,omitempty"`
 
+	// used by custom capture
+	MatchRuleIds []int     `json:"matchRuleIds,omitempty"`
+	Stack        []string  `json:"stack,omitempty"`
+	Memory       *[]string `json:"memory,omitempty"`
+
 	// Use for internal call stack organization
 	// The jump to go into the function
 	//enterPc uint64
@@ -141,6 +200,8 @@ type sentioTracer struct {
 
 	interrupt uint32 // Atomic flag to signal execution interruption
 	reason    error  // Textual reason for the interruption
+
+	extraCaptureRules []*Expr
 }
 
 func (t *sentioTracer) CaptureTxStart(gasLimit uint64) {
@@ -580,19 +641,37 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 			})
 		}
 	default:
-		if t.config.CaptureOpCodes != nil {
-			if _, ok := t.config.CaptureOpCodes[op.String()]; ok {
-				trace := mergeBase(Trace{})
-				t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
-				break
+		frame := &t.callstack[len(t.callstack)-1]
+		evalEnv := &EvalCtx{
+			Scope:  scope,
+			Op:     op,
+			Origin: t.env.Origin,
+			Debug:  t.config.Debug,
+		}
+		var matchRuleIds []int
+		for i, rule := range t.extraCaptureRules {
+			ret, err := rule.Eval(evalEnv)
+			if err != nil {
+				fmt.Println("eval err:", err)
+				continue
 			}
+			if ret == "true" {
+				matchRuleIds = append(matchRuleIds, i)
+			}
+		}
+		if len(matchRuleIds) > 0 {
+			frame.Traces = append(frame.Traces, mergeBase(Trace{
+				MatchRuleIds: matchRuleIds,
+				Stack:        copyStack(scope.Stack, scope.Stack.Len()),
+				Memory:       formatMemory(scope.Memory),
+			}))
 		}
 		if !t.config.WithInternalCalls {
 			break
 		}
 		if err != nil {
 			// Error happen, attach the error OP if not already processed
-			t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, mergeBase(Trace{}))
+			frame.Traces = append(frame.Traces, mergeBase(Trace{}))
 		}
 	}
 }
@@ -638,50 +717,6 @@ func (t *sentioTracer) GetResult() (json.RawMessage, error) {
 func (t *sentioTracer) Stop(err error) {
 	t.reason = err
 	atomic.StoreUint32(&t.interrupt, 1)
-}
-
-func newSentioTracer(name string, ctx *tracers.Context, cfg json.RawMessage) (tracers.Tracer, error) {
-	if name != "sentioTracer" {
-		return nil, errors.New("no tracer found")
-	}
-
-	var config sentioTracerConfig
-	functionMap := map[string]map[uint64]functionInfo{}
-	callMap := map[string]map[uint64]bool{}
-
-	if cfg != nil {
-		if err := json.Unmarshal(cfg, &config); err != nil {
-			return nil, err
-		}
-
-		for address, functions := range config.Functions {
-			checkSumAddress := libcommon.HexToAddress(address).String()
-			functionMap[checkSumAddress] = make(map[uint64]functionInfo)
-
-			for _, function := range functions {
-				function.address = checkSumAddress
-				functionMap[checkSumAddress][function.Pc] = function
-			}
-		}
-
-		for address, calls := range config.Calls {
-			checkSumAddress := libcommon.HexToAddress(address).String()
-			callMap[checkSumAddress] = make(map[uint64]bool)
-
-			for _, call := range calls {
-				callMap[checkSumAddress][call] = true
-			}
-		}
-
-		log.Info(fmt.Sprintf("create sentioTracer config with %d functions, %d calls", len(functionMap), len(callMap)))
-	}
-
-	return &sentioTracer{
-		config:      config,
-		functionMap: functionMap,
-		callMap:     callMap,
-		entryPc:     map[uint64]bool{},
-	}, nil
 }
 
 //func (t *sentioTracer) isPrecompiled(addr libcommon.Address) bool {
