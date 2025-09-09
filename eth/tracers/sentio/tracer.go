@@ -15,6 +15,7 @@ import (
 	"github.com/erigontech/erigon-lib/log/v3"
 	"github.com/erigontech/erigon/accounts/abi"
 	corestate "github.com/erigontech/erigon/core/state"
+	"github.com/erigontech/erigon/core/types"
 	"github.com/erigontech/erigon/core/vm"
 	"github.com/erigontech/erigon/core/vm/stack"
 	"github.com/erigontech/erigon/eth/tracers"
@@ -204,7 +205,7 @@ type sentioTracer struct {
 	extraCaptureRules []*Expr
 }
 
-func (t *sentioTracer) CaptureTxStart(gasLimit uint64) {
+func (t *sentioTracer) CaptureTxStart(gasLimit uint64, authorizations []types.Authorization) {
 	t.gasLimit = gasLimit
 }
 
