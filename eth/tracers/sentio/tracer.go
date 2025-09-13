@@ -596,6 +596,7 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		}
 		trace := mergeBase(Trace{
 			StorageAddress: &caller,
+			CodeAddress:    scope.Contract.CodeAddr,
 			StorageSlot:    &slot,
 			StorageValue:   &val,
 		})
@@ -615,6 +616,7 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		}
 		trace := mergeBase(Trace{
 			StorageAddress: &caller,
+			CodeAddress:    scope.Contract.CodeAddr,
 			StorageSlot:    &slot,
 			StorageValue:   &val,
 		})
