@@ -7,17 +7,16 @@ import (
 	"math/big"
 	"sync/atomic"
 
+	"github.com/erigontech/erigon-lib/abi"
 	"github.com/erigontech/erigon-lib/common"
 	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/hexutil"
-	"github.com/erigontech/erigon-lib/common/hexutility"
+	"github.com/erigontech/erigon-lib/common/math"
 	"github.com/erigontech/erigon-lib/crypto"
 	"github.com/erigontech/erigon-lib/log/v3"
-	"github.com/erigontech/erigon/accounts/abi"
-	corestate "github.com/erigontech/erigon/core/state"
-	"github.com/erigontech/erigon/core/types"
+	"github.com/erigontech/erigon-lib/types"
+	"github.com/erigontech/erigon/core/tracing"
 	"github.com/erigontech/erigon/core/vm"
-	"github.com/erigontech/erigon/core/vm/stack"
 	"github.com/erigontech/erigon/eth/tracers"
 	"github.com/holiman/uint256"
 )
@@ -44,9 +43,9 @@ type sentioTracerConfig struct {
 	ExtraCaptureRules []string                  `json:"extraCaptureRules"`
 }
 
-func newSentioTracer(name string, ctx *tracers.Context, cfg json.RawMessage) (tracers.Tracer, error) {
+func newSentioTracer(name string, ctx *tracers.Context, cfg json.RawMessage) (*tracers.Tracer, error) {
 	if name != "sentioTracer" {
-		return nil, errors.New("no tracer found")
+		return nil, errors.New("not sentioTracer")
 	}
 
 	var config sentioTracerConfig
@@ -85,16 +84,26 @@ func newSentioTracer(name string, ctx *tracers.Context, cfg json.RawMessage) (tr
 			}
 			extraCaptureRules = append(extraCaptureRules, expr)
 		}
-
-		log.Info(fmt.Sprintf("create sentioTracer config with %d functions, %d calls, %d capture rules", len(functionMap), len(callMap), len(extraCaptureRules)))
 	}
 
-	return &sentioTracer{
+	t := &sentioTracer{
+		ctx:               ctx,
 		config:            config,
 		functionMap:       functionMap,
 		callMap:           callMap,
 		entryPc:           map[uint64]bool{},
 		extraCaptureRules: extraCaptureRules,
+	}
+	return &tracers.Tracer{
+		Hooks: &tracing.Hooks{
+			OnTxStart: t.CaptureStart,
+			OnTxEnd:   t.CaptureTxEnd,
+			OnEnter:   t.CaptureEnter,
+			OnExit:    t.CaptureExit,
+			OnOpcode:  t.CaptureState,
+		},
+		GetResult: t.GetResult,
+		Stop:      t.Stop,
 	}, nil
 }
 
@@ -113,9 +122,9 @@ type Trace struct {
 	EndIndex   int `json:"endIndex"`
 
 	// Gas remaining before the OP
-	Gas hexutil.Uint64 `json:"gas"`
+	Gas math.HexOrDecimal64 `json:"gas"`
 	// Gas for the entire call
-	GasUsed hexutil.Uint64 `json:"gasUsed"`
+	GasUsed math.HexOrDecimal64 `json:"gasUsed"`
 
 	From *libcommon.Address `json:"from,omitempty"`
 	// Used by call
@@ -125,21 +134,21 @@ type Trace struct {
 	// Ether transfered
 	Value *hexutil.Big `json:"value,omitempty"`
 	// Return for calls
-	Output   hexutility.Bytes `json:"output,omitempty"`
-	Error    string           `json:"error,omitempty"`
-	Revertal string           `json:"revertReason,omitempty"`
+	Output   hexutil.Bytes `json:"output,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Revertal string        `json:"revertReason,omitempty"`
 
 	// Used by jump
-	InputStack   []string  `json:"inputStack,omitempty"`
-	InputMemory  *[]string `json:"inputMemory,omitempty"`
-	OutputStack  []string  `json:"outputStack,omitempty"`
-	OutputMemory *[]string `json:"outputMemory,omitempty"`
-	FunctionPc   uint64    `json:"functionPc,omitempty"`
+	InputStack   []uint256.Int `json:"inputStack,omitempty"`
+	InputMemory  *[]string     `json:"inputMemory,omitempty"`
+	OutputStack  []uint256.Int `json:"outputStack,omitempty"`
+	OutputMemory *[]string     `json:"outputMemory,omitempty"`
+	FunctionPc   uint64        `json:"functionPc,omitempty"`
 
 	// Used by log
 	Address     *libcommon.Address `json:"address,omitempty"`
 	CodeAddress *libcommon.Address `json:"codeAddress,omitempty"`
-	Data        hexutility.Bytes   `json:"data,omitempty"`
+	Data        hexutil.Bytes      `json:"data,omitempty"`
 
 	Topics []libcommon.Hash `json:"topics,omitempty"`
 
@@ -154,9 +163,9 @@ type Trace struct {
 	Traces []Trace `json:"traces,omitempty"`
 
 	// used by custom capture
-	MatchRuleIds []int     `json:"matchRuleIds,omitempty"`
-	Stack        []string  `json:"stack,omitempty"`
-	Memory       *[]string `json:"memory,omitempty"`
+	MatchRuleIds []int         `json:"matchRuleIds,omitempty"`
+	Stack        []uint256.Int `json:"stack,omitempty"`
+	Memory       *[]string     `json:"memory,omitempty"`
 
 	// Use for internal call stack organization
 	// The jump to go into the function
@@ -185,12 +194,15 @@ type Receipt struct {
 }
 
 type sentioTracer struct {
-	config      sentioTracerConfig
-	env         *vm.EVM
-	functionMap map[string]map[uint64]functionInfo
-	callMap     map[string]map[uint64]bool
-	receipt     Receipt
-	refund      uint64
+	config            sentioTracerConfig
+	env               *tracing.VMContext
+	ctx               *tracers.Context
+	functionMap       map[string]map[uint64]functionInfo
+	callMap           map[string]map[uint64]bool
+	receipt           Receipt
+	refund            uint64
+	activePrecompiles []common.Address // Updated on CaptureStart based on given rules
+	origin            common.Address
 
 	previousJump *Trace
 	index        int
@@ -205,48 +217,51 @@ type sentioTracer struct {
 	extraCaptureRules []*Expr
 }
 
-func (t *sentioTracer) CaptureTxStart(gasLimit uint64, authorizations []types.Authorization) {
-	t.gasLimit = gasLimit
-}
-
-func (t *sentioTracer) CaptureTxEnd(restGas uint64) {
+func (t *sentioTracer) CaptureTxEnd(receipt *types.Receipt, err error) {
+	if err != nil {
+		return
+	}
+	if receipt == nil {
+		panic("tx success but receipt is nil")
+	}
 	if len(t.callstack) == 0 {
 		return
 	}
 	t.callstack[0].EndIndex = t.index
-	t.callstack[0].GasUsed = hexutil.Uint64(t.gasLimit - restGas)
+	t.callstack[0].GasUsed = math.HexOrDecimal64(receipt.GasUsed)
 	if t.callstack[0].StartIndex == -1 {
 		// It's possible that we can't correctly locate the PC that match the entry function (check why), in this case we need to 0 for the user
 		t.callstack[0].StartIndex = 0
 	}
-	t.refund = t.env.IntraBlockState().GetRefund()
 }
 
-func (t *sentioTracer) CaptureStart(env *vm.EVM, from libcommon.Address, to libcommon.Address, precompile bool, create bool, input []byte, gas uint64, value *uint256.Int, code []byte) {
+func (t *sentioTracer) CaptureStart(env *tracing.VMContext, tx types.Transaction, from common.Address) {
+	t.gasLimit = tx.GetGasLimit()
+	t.origin = from
+	to := tx.GetTo()
+	data := tx.GetData()
+	value := tx.GetValue()
+	create := tx.IsContractDeploy()
+
 	t.env = env
-	t.receipt.BlockNumber = (*hexutil.Big)(big.NewInt(int64(env.Context.BlockNumber)))
-	//if env.Context().GetHash != nil {
-	// TODO this current will block the tracer
-	//	h := env.Context().GetHash(env.Context().BlockNumber)
-	//	t.receipt.BlockHash = &h
-	//}
-	if (env.TxContext.TxHash != libcommon.Hash{}) {
-		h := t.env.TxContext.TxHash
-		t.receipt.TxHash = &h
-	}
+	rules := env.ChainConfig.Rules(env.BlockNumber, env.Time)
+	t.activePrecompiles = vm.ActivePrecompiles(rules)
+
+	t.receipt.TxHash = &t.ctx.TxHash
+	t.receipt.BlockHash = &t.ctx.BlockHash
+	t.receipt.TransactionIndex = uint(t.ctx.TxIndex)
+	t.receipt.BlockNumber = (*hexutil.Big)(big.NewInt(int64(env.BlockNumber)))
 	t.receipt.GasPrice = (*hexutil.Big)(env.GasPrice.ToBig())
-	nonce, _ := t.env.IntraBlockState().GetNonce(from)
+	nonce, _ := t.env.IntraBlockState.GetNonce(from)
 	t.receipt.Nonce = nonce - 1
-	if ibs, ok := env.IntraBlockState().(*corestate.IntraBlockState); ok {
-		t.receipt.TransactionIndex = uint(ibs.TxnIndex())
-	}
+
 	root := Trace{
 		StartIndex: -1,
 		Type:       vm.CALL.String(),
 		From:       &from,
-		To:         &to,
-		Gas:        hexutil.Uint64(gas),
-		Input:      hexutility.Bytes(input).String(),
+		To:         to,
+		Gas:        math.HexOrDecimal64(t.gasLimit),
+		Input:      hexutil.Bytes(data).String(),
 	}
 	if value != nil {
 		root.Value = (*hexutil.Big)(value.ToBig())
@@ -255,25 +270,37 @@ func (t *sentioTracer) CaptureStart(env *vm.EVM, from libcommon.Address, to libc
 		root.Type = vm.CREATE.String()
 	}
 
-	if !create && !precompile && len(input) >= 4 {
+	if !create && !t.isPrecompiled(to) && len(data) >= 4 {
 		m, ok := t.functionMap[to.String()]
 		if ok {
-			sigHash := "0x" + common.Bytes2Hex(input[0:4])
+			sigHash := "0x" + common.Bytes2Hex(data[0:4])
 			for pc, fn := range m {
 				if fn.SignatureHash == sigHash {
 					t.entryPc[pc] = true
 				}
 			}
-			log.Info(fmt.Sprintf("entry pc match %s (%d times) ", sigHash, len(t.entryPc)))
+			//log.Info(fmt.Sprintf("entry pc match %s (%d times) ", sigHash, len(t.entryPc)))
 		}
 	}
 	t.callstack = append(t.callstack, root)
 }
 
-func (t *sentioTracer) CaptureEnd(output []byte, usedGas uint64, err error) {
+func (t *sentioTracer) isPrecompiled(addr *common.Address) bool {
+	if addr == nil {
+		return false
+	}
+	for _, p := range t.activePrecompiles {
+		if p == *addr {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *sentioTracer) captureEnd(output []byte, usedGas uint64, err error, reverted bool) {
 	t.callstack[0].EndIndex = t.index
-	t.callstack[0].GasUsed = hexutil.Uint64(usedGas)
-	t.callstack[0].Output = libcommon.CopyBytes(output)
+	t.callstack[0].GasUsed = math.HexOrDecimal64(usedGas)
+	t.callstack[0].Output = common.CopyBytes(output)
 
 	stackSize := len(t.callstack)
 	t.popStack(1, output, uint64(t.callstack[stackSize-1].Gas)-usedGas, err)
@@ -281,12 +308,16 @@ func (t *sentioTracer) CaptureEnd(output []byte, usedGas uint64, err error) {
 	t.callstack[0].processError(output, err)
 }
 
-func (t *sentioTracer) CaptureEnter(typ vm.OpCode, from libcommon.Address, to libcommon.Address, precompile bool, create bool, input []byte, gas uint64, value *uint256.Int, code []byte) {
+func (t *sentioTracer) CaptureEnter(depth int, typByte byte, from common.Address, to common.Address, precompile bool, input []byte, gas uint64, value *uint256.Int, code []byte) {
+	if depth == 0 {
+		return
+	}
 	// Skip if tracing was interrupted
 	if atomic.LoadUint32(&t.interrupt) > 0 {
 		return
 	}
 
+	typ := vm.OpCode(typByte)
 	if typ == vm.CALL || typ == vm.CALLCODE {
 		// After enter, make the assumped transfer as function call
 		topElementTraces := t.callstack[len(t.callstack)-1].Traces
@@ -300,15 +331,19 @@ func (t *sentioTracer) CaptureEnter(typ vm.OpCode, from libcommon.Address, to li
 
 	t.callstack[size-1].From = &from
 	t.callstack[size-1].To = &to
-	t.callstack[size-1].Input = hexutility.Bytes(input).String()
-	t.callstack[size-1].Gas = hexutil.Uint64(gas)
+	t.callstack[size-1].Input = hexutil.Bytes(input).String()
+	t.callstack[size-1].Gas = math.HexOrDecimal64(gas)
 
 	if value != nil {
 		t.callstack[size-1].Value = (*hexutil.Big)(value.ToBig())
 	}
 }
 
-func (t *sentioTracer) CaptureExit(output []byte, usedGas uint64, err error) {
+func (t *sentioTracer) CaptureExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
+	if depth == 0 {
+		t.captureEnd(output, gasUsed, err, reverted)
+		return
+	}
 	size := len(t.callstack)
 	if size <= 1 {
 		return
@@ -322,16 +357,16 @@ func (t *sentioTracer) CaptureExit(output []byte, usedGas uint64, err error) {
 			continue
 		}
 
-		if stackSize-i > 1 {
-			log.Info(fmt.Sprintf("tail call optimization [external] size %d", stackSize-i))
-		}
+		//if stackSize-i > 1 {
+		//	log.Info(fmt.Sprintf("tail call optimization [external] size %d", stackSize-i))
+		//}
 
 		call := &t.callstack[i]
 		//call.EndIndex = t.index
 		//call.GasUsed = math.HexOrDecimal64(usedGas)
 		call.processError(output, err)
 
-		t.popStack(i, output, uint64(call.Gas)-usedGas, err)
+		t.popStack(i, output, uint64(call.Gas)-gasUsed, err)
 		return
 	}
 
@@ -341,9 +376,9 @@ func (t *sentioTracer) CaptureExit(output []byte, usedGas uint64, err error) {
 func (t *sentioTracer) popStack(to int, output []byte, currentGas uint64, err error) { // , scope *vm.ScopeContext
 	stackSize := len(t.callstack)
 	for j := stackSize - 1; j >= to; j-- {
-		t.callstack[j].Output = libcommon.CopyBytes(output)
+		t.callstack[j].Output = common.CopyBytes(output)
 		t.callstack[j].EndIndex = t.index
-		t.callstack[j].GasUsed = t.callstack[j].Gas - hexutil.Uint64(currentGas)
+		t.callstack[j].GasUsed = math.HexOrDecimal64(uint64(t.callstack[j].Gas) - currentGas)
 
 		// TODO consider pass scopeContext so that popStack also record this
 		//if t.callstack[j].function != nil {
@@ -361,7 +396,8 @@ func (t *sentioTracer) popStack(to int, output []byte, currentGas uint64, err er
 	t.callstack = t.callstack[:to]
 }
 
-func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) {
+func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, scope tracing.OpContext, rData []byte, depth int, err error) {
+	op := vm.OpCode(opByte)
 	// Skip if tracing was interrupted
 	if atomic.LoadUint32(&t.interrupt) > 0 {
 		return
@@ -379,12 +415,12 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 	var mergeBase = func(trace Trace) Trace {
 		trace.Pc = pc
 		trace.Type = op.String()
-		trace.Gas = hexutil.Uint64(gas)
+		trace.Gas = math.HexOrDecimal64(gas)
 		trace.StartIndex = t.index - 1
 		trace.EndIndex = t.index
 
 		// Assume it's single instruction, adjust it for jump and call
-		trace.GasUsed = hexutil.Uint64(cost)
+		trace.GasUsed = math.HexOrDecimal64(cost)
 		if err != nil {
 			// set error for instruction
 			trace.Error = err.Error()
@@ -392,21 +428,30 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		return trace
 	}
 
+	stack := scope.StackData()
+	stackBack := func(i int) *uint256.Int {
+		return &stack[len(stack)-1-i]
+	}
+
+	// TODO need test
+	caller := scope.Caller()
+	codeAddress := scope.Address()
+
 	switch op {
 	case vm.CALL, vm.CALLCODE:
 		call := mergeBase(Trace{})
-
-		call.Gas = hexutil.Uint64(scope.Stack.Back(0).Uint64())
-		from := scope.Contract.Address()
-		call.From = &from
-		call.CodeAddress = scope.Contract.CodeAddr
-		to := libcommon.BigToAddress(scope.Stack.Back(1).ToBig())
+		call.Gas = math.HexOrDecimal64(stackBack(0).Uint64())
+		call.From = &caller
+		// TODO need test
+		call.CodeAddress = &codeAddress
+		to := common.BigToAddress(stackBack(1).ToBig())
 		call.To = &to
-		call.Value = (*hexutil.Big)(scope.Stack.Back(2).ToBig())
+		call.Value = (*hexutil.Big)(stackBack(2).ToBig())
 
 		v, _ := uint256.FromBig(call.Value.ToInt())
 		if !v.IsZero() {
-			canTransfer, _ := t.env.Context.CanTransfer(t.env.IntraBlockState(), from, v)
+			balance, _ := t.env.IntraBlockState.GetBalance(caller)
+			canTransfer := balance.Cmp(v) >= 0
 			if !canTransfer {
 				if call.Error == "" {
 					call.Error = "insufficient funds for transfer"
@@ -422,18 +467,17 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		t.callstack = append(t.callstack, call)
 	case vm.LOG0, vm.LOG1, vm.LOG2, vm.LOG3, vm.LOG4:
 		topicCount := int(op - vm.LOG0)
-		logOffset := scope.Stack.Peek()
-		logSize := scope.Stack.Back(1)
-		data := copyMemory(scope.Memory, logOffset, logSize)
-		var topics []libcommon.Hash
+		logOffset := stackBack(0)
+		logSize := stackBack(1)
+		data := copyMemory(scope.MemoryData(), logOffset.Uint64(), logSize.Uint64())
+		var topics []common.Hash
 		//stackLen := scope.Stack.Len()
 		for i := 0; i < topicCount; i++ {
-			topics = append(topics, scope.Stack.Back(2+i).Bytes32())
+			topics = append(topics, stackBack(2+i).Bytes32())
 		}
-		addr := scope.Contract.Address()
 		l := mergeBase(Trace{
-			Address:     &addr,
-			CodeAddress: scope.Contract.CodeAddr,
+			Address:     &caller,
+			CodeAddress: &codeAddress,
 			Data:        data,
 			Topics:      topics,
 		})
@@ -442,12 +486,10 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		if !t.config.WithInternalCalls {
 			break
 		}
-		from := scope.Contract.CodeAddr
-		codeAddress := scope.Contract.CodeAddr
 
 		jump := mergeBase(Trace{
-			From:        from,
-			CodeAddress: codeAddress,
+			From:        &codeAddress,
+			CodeAddress: &codeAddress,
 			//InputStack: append([]uint256.Int(nil), scope.Stack.Data...), // TODO only need partial
 		})
 		if t.previousJump != nil {
@@ -464,7 +506,7 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		if !t.config.WithInternalCalls {
 			break
 		}
-		from := scope.Contract.CodeAddr
+		from := caller
 		fromStr := from.String()
 
 		if t.previousJump != nil { // vm.JumpDest and match with a previous jump (otherwise it's a jumpi)
@@ -493,27 +535,27 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 				if t.callstack[i].exitPc == pc {
 					// find a match, pop the stack, copy memory if needed
 
-					if stackSize-i > 1 {
-						log.Info(fmt.Sprintf("tail call optimization size %d", stackSize-i))
-					}
+					//if stackSize-i > 1 {
+					//	log.Info(fmt.Sprintf("tail call optimization size %d", stackSize-i))
+					//}
 
 					// TODO maybe don't need return all
 					for j := stackSize - 1; j >= i; j-- {
 						call := &t.callstack[j]
 						functionJ := call.function
 						call.EndIndex = t.index - 1 // EndIndex should before the jumpdest
-						call.GasUsed = t.callstack[j].Gas - hexutil.Uint64(gas)
-						if functionJ.OutputSize > scope.Stack.Len() {
+						call.GasUsed = math.HexOrDecimal64(uint64(t.callstack[j].Gas) - gas)
+						if functionJ.OutputSize > len(stack) {
 							log.Error(fmt.Sprintf("stack size not enough (%d vs %d) for function %s %s. pc: %d",
-								scope.Stack.Len(), functionJ.OutputSize, functionJ.address, functionJ.Name, pc))
+								len(stack), functionJ.OutputSize, functionJ.address, functionJ.Name, pc))
 							if err == nil {
 								log.Error("stack size not enough has error", "err", err)
 							}
 						} else {
-							call.OutputStack = copyStack(scope.Stack, t.callstack[j].function.OutputSize)
+							call.OutputStack = copyStack(stack, t.callstack[j].function.OutputSize)
 						}
 						if call.function.OutputMemory {
-							call.OutputMemory = formatMemory(scope.Memory)
+							call.OutputMemory = formatMemory(scope.MemoryData())
 						}
 						//if err != nil {
 						//	call.Error = err.Error()
@@ -535,9 +577,9 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 					return
 				}
 
-				if funcInfo.InputSize >= scope.Stack.Len() {
+				if funcInfo.InputSize >= len(stack) {
 					// TODO this check should not needed after frist check
-					log.Error("Unexpected stack size for function:" + fmt.Sprint(funcInfo) + ", stack" + fmt.Sprint(scope.Stack.Data))
+					log.Error("Unexpected stack size for function:" + fmt.Sprint(funcInfo) + ", stack" + fmt.Sprint(stack))
 					log.Error("previous jump" + fmt.Sprint(*t.previousJump))
 					return
 				}
@@ -549,27 +591,26 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 				//	function: funcInfo,
 				//})
 				//jump.enterPc = t.previousJump.Pc
-				t.previousJump.exitPc = scope.Stack.Back(funcInfo.InputSize).Uint64()
+				t.previousJump.exitPc = stackBack(funcInfo.InputSize).Uint64()
 				t.previousJump.function = funcInfo
 				t.previousJump.FunctionPc = pc
-				t.previousJump.InputStack = copyStack(scope.Stack, funcInfo.InputSize)
+				t.previousJump.InputStack = copyStack(stack, funcInfo.InputSize)
 				if t.config.Debug {
 					t.previousJump.Name = funcInfo.Name
 				}
 				if funcInfo.InputMemory {
-					t.previousJump.InputMemory = formatMemory(scope.Memory)
+					t.previousJump.InputMemory = formatMemory(scope.MemoryData())
 				}
 				t.callstack = append(t.callstack, *t.previousJump)
-				//t.callstack = append(t.callstack, callStack{
 			}
 		}
 	case vm.REVERT:
 		if !t.config.WithInternalCalls {
 			break
 		}
-		logOffset := scope.Stack.Peek()
-		logSize := scope.Stack.Back(1)
-		output := scope.Memory.GetPtr(int64(logOffset.Uint64()), int64(logSize.Uint64()))
+		logOffset := stackBack(0)
+		logSize := stackBack(1)
+		output := scope.MemoryData()[logOffset.Uint64() : logOffset.Uint64()+logSize.Uint64()]
 		//data := copyMemory(logOffset, logSize)
 
 		trace := mergeBase(Trace{
@@ -584,51 +625,50 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		if !t.config.WithStorage {
 			break
 		}
-		caller := scope.Contract.Address()
-		slot := libcommon.Hash(scope.Stack.Peek().Bytes32())
+		slot := libcommon.Hash(stackBack(0).Bytes32())
 		var val libcommon.Hash
 		if op == vm.SLOAD {
 			var v uint256.Int
-			_ = t.env.IntraBlockState().GetState(caller, &slot, &v)
+			_ = t.env.IntraBlockState.GetState(caller, slot, &v)
 			val = v.Bytes32()
 		} else {
-			val = scope.Stack.Back(1).Bytes32()
+			val = stackBack(1).Bytes32()
 		}
 		trace := mergeBase(Trace{
 			StorageAddress: &caller,
-			CodeAddress:    scope.Contract.CodeAddr,
+			CodeAddress:    &codeAddress,
 			StorageSlot:    &slot,
 			StorageValue:   &val,
 		})
 		t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
-	case vm.TLOAD, vm.TSTORE:
-		if !t.config.WithStorage {
-			break
-		}
-		caller := scope.Contract.Address()
-		slot := libcommon.Hash(scope.Stack.Peek().Bytes32())
-		var val libcommon.Hash
-		if op == vm.TLOAD {
-			v := t.env.IntraBlockState().GetTransientState(caller, slot)
-			val = v.Bytes32()
-		} else {
-			val = scope.Stack.Back(1).Bytes32()
-		}
-		trace := mergeBase(Trace{
-			StorageAddress: &caller,
-			CodeAddress:    scope.Contract.CodeAddr,
-			StorageSlot:    &slot,
-			StorageValue:   &val,
-		})
-		t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
+	// FIXME TLOAD/TSTORE
+	//case vm.TLOAD, vm.TSTORE:
+	//	if !t.config.WithStorage {
+	//		break
+	//	}
+	//	slot := libcommon.Hash(stackBack(0).Bytes32())
+	//	var val libcommon.Hash
+	//	if op == vm.TLOAD {
+	//		v := t.env.IntraBlockState.GetTransientState(caller, slot)
+	//		val = v.Bytes32()
+	//	} else {
+	//		val = scope.Stack.Back(1).Bytes32()
+	//	}
+	//	trace := mergeBase(Trace{
+	//		StorageAddress: &caller,
+	//		CodeAddress:    &codeAddress,
+	//		StorageSlot:    &slot,
+	//		StorageValue:   &val,
+	//	})
+	//	t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
 	case vm.KECCAK256:
 		if !t.config.WithStorageKeys {
 			break
 		}
-		size := scope.Stack.Back(1)
+		size := stackBack(1)
 		if size.Uint64() == 64 {
-			offset := scope.Stack.Peek()
-			rawkey := scope.Memory.GetCopy(int64(offset.Uint64()), 64)
+			offset := stackBack(0)
+			rawkey := copyMemory(scope.MemoryData(), offset.Uint64(), 64)
 
 			// only cares 64 bytes for mapping key
 			hashOfKey := crypto.Keccak256(rawkey)
@@ -636,8 +676,8 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 			baseSlot := common.Hash(rawkey[32:])
 			valueSlot := common.Hash(hashOfKey)
 			t.callstack[len(t.callstack)-1].StorageKeys = append(t.callstack[len(t.callstack)-1].StorageKeys, StorageKey{
-				Address:     scope.Contract.Address(),
-				CodeAddress: scope.Contract.CodeAddr,
+				Address:     caller,
+				CodeAddress: &codeAddress,
 				BaseSlot:    baseSlot,
 				KeySlot:     valueSlot,
 				Key:         key,
@@ -648,14 +688,14 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		evalEnv := &EvalCtx{
 			Scope:  scope,
 			Op:     op,
-			Origin: t.env.Origin,
+			Origin: t.origin,
 			Debug:  t.config.Debug,
 		}
+
 		var matchRuleIds []int
 		for i, rule := range t.extraCaptureRules {
 			ret, err := rule.Eval(evalEnv)
 			if err != nil {
-				fmt.Println("eval err:", err)
 				continue
 			}
 			if ret == "true" {
@@ -665,8 +705,8 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 		if len(matchRuleIds) > 0 {
 			frame.Traces = append(frame.Traces, mergeBase(Trace{
 				MatchRuleIds: matchRuleIds,
-				Stack:        copyStack(scope.Stack, scope.Stack.Len()),
-				Memory:       formatMemory(scope.Memory),
+				Stack:        copyStack(scope.StackData(), len(scope.StackData())),
+				Memory:       formatMemory(scope.MemoryData()),
 			}))
 		}
 		if !t.config.WithInternalCalls {
@@ -677,16 +717,6 @@ func (t *sentioTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, s
 			frame.Traces = append(frame.Traces, mergeBase(Trace{}))
 		}
 	}
-}
-
-func (t *sentioTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, depth int, err error) {
-}
-
-// CapturePreimage records a SHA3 preimage discovered during execution.
-func (t *sentioTracer) CapturePreimage(pc uint64, hash libcommon.Hash, preimage []byte) {}
-
-func (t *sentioTracer) CaptureSystemTxEnd(intrinsicGas uint64) {
-	// TODO check this
 }
 
 func (t *sentioTracer) GetResult() (json.RawMessage, error) {
@@ -721,15 +751,6 @@ func (t *sentioTracer) Stop(err error) {
 	t.reason = err
 	atomic.StoreUint32(&t.interrupt, 1)
 }
-
-//func (t *sentioTracer) isPrecompiled(addr libcommon.Address) bool {
-//	for _, p := range t.activePrecompiles {
-//		if p == addr {
-//			return true
-//		}
-//	}
-//	return false
-//}
 
 func (t *sentioTracer) getFunctionInfo(address string, pc uint64) *functionInfo {
 	m, ok := t.functionMap[address]
@@ -779,27 +800,29 @@ func (f *Trace) processError(output []byte, err error) {
 	}
 }
 
-func copyMemory(m *vm.Memory, offset *uint256.Int, size *uint256.Int) hexutility.Bytes {
+func copyMemory(m []byte, offset uint64, size uint64) hexutil.Bytes {
 	// it's important to get copy
-	return m.GetCopy(int64(offset.Uint64()), int64(size.Uint64()))
+	res := make([]byte, size)
+	copy(res, m[offset:offset+size])
+	return res
 }
 
-func formatMemory(m *vm.Memory) *[]string {
-	res := make([]string, 0, (m.Len()+31)/32)
-	for i := 0; i+32 <= m.Len(); i += 32 {
-		res = append(res, fmt.Sprintf("%x", m.GetPtr(int64(i), 32)))
+func formatMemory(m []byte) *[]string {
+	res := make([]string, 0, (len(m)+31)/32)
+	for i := 0; i+32 <= len(m); i += 32 {
+		res = append(res, fmt.Sprintf("%x", m[uint64(i):uint64(i)+32]))
 	}
 	return &res
 }
 
-func copyStack(s *stack.Stack, copySize int) []string {
+func copyStack(s []uint256.Int, copySize int) []uint256.Int {
 	if copySize == 0 {
 		return nil
 	}
-	stackSize := s.Len()
-	res := make([]string, stackSize)
+	stackSize := len(s)
+	res := make([]uint256.Int, stackSize)
 	for i := stackSize - copySize; i < stackSize; i++ {
-		res[i] = s.Data[i].Hex()
+		res[i] = s[i]
 	}
 	return res
 }
