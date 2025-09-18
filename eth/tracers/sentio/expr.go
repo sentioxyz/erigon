@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	libcommon "github.com/erigontech/erigon-lib/common"
+	"github.com/erigontech/erigon/core/tracing"
 	"github.com/erigontech/erigon/core/vm"
 	"github.com/holiman/uint256"
 )
@@ -47,7 +48,7 @@ type Expr struct {
 
 type EvalCtx struct {
 	Op     vm.OpCode
-	Scope  *vm.ScopeContext
+	Scope  tracing.OpContext
 	Origin libcommon.Address
 	Debug  bool
 }
@@ -79,19 +80,20 @@ func (e *Expr) Eval(ctx *EvalCtx) (ret string, err error) {
 		if len(e.Args) == 0 {
 			return "", fmt.Errorf("not enough arguments to %s", e.Op)
 		}
+		stack := ctx.Scope.StackData()
 		idx, err := strconv.Atoi(e.Args[0])
 		if err != nil {
 			return "", err
 		}
-		if idx >= ctx.Scope.Stack.Len() {
+		if idx >= len(stack) {
 			return "", fmt.Errorf("stack index out of bounds: %d", idx)
 		}
-		return ctx.Scope.Stack.Back(idx).Hex(), nil
+		return stack[len(stack)-idx].Hex(), nil
 	case OpVmOp:
 		return ctx.Op.String(), nil
 	case OpCaller:
 		t := uint256.Int{}
-		t.SetBytes(ctx.Scope.Contract.Caller().Bytes())
+		t.SetBytes(ctx.Scope.Caller().Bytes())
 		return t.Hex(), nil
 	case OpOrigin:
 		t := uint256.Int{}

@@ -50,7 +50,7 @@ type Config struct {
 
 	ExtraEips []int // Additional EIPS that are to be enabled
 
-	libcommon.SentioTraceConfig
+	common.SentioTraceConfig
 }
 
 func (vmConfig *Config) HasEip3860(rules *chain.Rules) bool {
@@ -236,7 +236,7 @@ func NewEVMInterpreter(evm *EVM, cfg Config) *EVMInterpreter {
 				continue
 			}
 			op.constantGas = 0
-			op.dynamicGas = func(*EVM, *Contract, *stack.Stack, *Memory, uint64) (uint64, error) {
+			op.dynamicGas = func(*EVM, *Contract, *Stack, *Memory, uint64) (uint64, error) {
 				return 0, nil
 			}
 		}

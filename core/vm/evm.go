@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/erigontech/erigon-lib/common/hexutil"
 	"github.com/holiman/uint256"
 
 	"github.com/erigontech/erigon-lib/common/empty"
@@ -32,7 +33,6 @@ import (
 	"github.com/erigontech/erigon-lib/chain"
 	"github.com/erigontech/erigon-lib/chain/params"
 	"github.com/erigontech/erigon-lib/common"
-	"github.com/erigontech/erigon-lib/common/hexutility"
 	"github.com/erigontech/erigon-lib/common/u256"
 	"github.com/erigontech/erigon-lib/crypto"
 	"github.com/erigontech/erigon/core/tracing"
@@ -193,7 +193,7 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr common.Address, input 
 	}
 	if len(evm.config.CallerOverride) > 0 && (typ == CALL || typ == CALLCODE) && len(input) >= 4 {
 		if overrides, ok := evm.config.CallerOverride[addr]; ok {
-			sig := hexutility.Encode(input[:4])
+			sig := hexutil.Encode(input[:4])
 			if newCaller, ok := overrides[sig]; ok {
 				caller = contractRef{addr: newCaller}
 			}
@@ -255,7 +255,7 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr common.Address, input 
 	var mockOutput []byte
 	if len(evm.config.MockFunctions) > 0 && (typ == CALL || typ == CALLCODE) && len(input) >= 4 {
 		if mocks, ok := evm.config.MockFunctions[addr]; ok {
-			sig := hexutility.Encode(input[:4])
+			sig := hexutil.Encode(input[:4])
 			if output, ok := mocks[sig]; ok {
 				mock = true
 				mockOutput = output
@@ -407,23 +407,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 				address = *override.NewAddress
 			}
 			if override.NewCode != nil {
-				codeAndHash.code = *override.NewCode
-				codeAndHash.hash = libcommon.Hash{}
+				codeAndHash.code = override.NewCode
+				codeAndHash.hash = common.Hash{}
 				_ = codeAndHash.Hash()
 			}
-		}
-	}
-	if evm.config.Debug {
-		if depth == 0 {
-			evm.config.Tracer.CaptureStart(evm, caller.Address(), address, false /* precompile */, true /* create */, codeAndHash.code, gasRemaining, value, nil)
-			defer func() {
-				evm.config.Tracer.CaptureEnd(ret, gasConsumption, err)
-			}()
-		} else {
-			evm.config.Tracer.CaptureEnter(typ, caller.Address(), address, false /* precompile */, true /* create */, codeAndHash.code, gasRemaining, value, nil)
-			defer func() {
-				evm.config.Tracer.CaptureExit(ret, gasConsumption, err)
-			}()
 		}
 	}
 
