@@ -434,23 +434,23 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 	}
 
 	// TODO need test
-	caller := scope.Caller()
-	codeAddress := scope.Address()
+	addr := scope.Address()
+	codeAddress := scope.CodeAddress()
 
 	switch op {
 	case vm.CALL, vm.CALLCODE:
 		call := mergeBase(Trace{})
 		call.Gas = math.HexOrDecimal64(stackBack(0).Uint64())
-		call.From = &caller
+		call.From = &addr
 		// TODO need test
-		call.CodeAddress = &codeAddress
+		call.CodeAddress = codeAddress
 		to := common.BigToAddress(stackBack(1).ToBig())
 		call.To = &to
 		call.Value = (*hexutil.Big)(stackBack(2).ToBig())
 
 		v, _ := uint256.FromBig(call.Value.ToInt())
 		if !v.IsZero() {
-			balance, _ := t.env.IntraBlockState.GetBalance(caller)
+			balance, _ := t.env.IntraBlockState.GetBalance(addr)
 			canTransfer := balance.Cmp(v) >= 0
 			if !canTransfer {
 				if call.Error == "" {
@@ -469,6 +469,9 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 		topicCount := int(op - vm.LOG0)
 		logOffset := stackBack(0)
 		logSize := stackBack(1)
+		if logOffset.Uint64()+logSize.Uint64() > uint64(len(scope.MemoryData())) {
+			log.Error("logOffset overflow", "tx", t.env.TxHash)
+		}
 		data := copyMemory(scope.MemoryData(), logOffset.Uint64(), logSize.Uint64())
 		var topics []common.Hash
 		//stackLen := scope.Stack.Len()
@@ -476,8 +479,8 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 			topics = append(topics, stackBack(2+i).Bytes32())
 		}
 		l := mergeBase(Trace{
-			Address:     &caller,
-			CodeAddress: &codeAddress,
+			Address:     &addr,
+			CodeAddress: codeAddress,
 			Data:        data,
 			Topics:      topics,
 		})
@@ -488,8 +491,8 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 		}
 
 		jump := mergeBase(Trace{
-			From:        &codeAddress,
-			CodeAddress: &codeAddress,
+			From:        codeAddress,
+			CodeAddress: codeAddress,
 			//InputStack: append([]uint256.Int(nil), scope.Stack.Data...), // TODO only need partial
 		})
 		if t.previousJump != nil {
@@ -506,7 +509,7 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 		if !t.config.WithInternalCalls {
 			break
 		}
-		from := caller
+		from := addr
 		fromStr := from.String()
 
 		if t.previousJump != nil { // vm.JumpDest and match with a previous jump (otherwise it's a jumpi)
@@ -629,14 +632,14 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 		var val libcommon.Hash
 		if op == vm.SLOAD {
 			var v uint256.Int
-			_ = t.env.IntraBlockState.GetState(caller, slot, &v)
+			_ = t.env.IntraBlockState.GetState(addr, slot, &v)
 			val = v.Bytes32()
 		} else {
 			val = stackBack(1).Bytes32()
 		}
 		trace := mergeBase(Trace{
-			StorageAddress: &caller,
-			CodeAddress:    &codeAddress,
+			StorageAddress: &addr,
+			CodeAddress:    codeAddress,
 			StorageSlot:    &slot,
 			StorageValue:   &val,
 		})
@@ -649,13 +652,13 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 	//	slot := libcommon.Hash(stackBack(0).Bytes32())
 	//	var val libcommon.Hash
 	//	if op == vm.TLOAD {
-	//		v := t.env.IntraBlockState.GetTransientState(caller, slot)
+	//		v := t.env.IntraBlockState.GetTransientState(addr, slot)
 	//		val = v.Bytes32()
 	//	} else {
 	//		val = scope.Stack.Back(1).Bytes32()
 	//	}
 	//	trace := mergeBase(Trace{
-	//		StorageAddress: &caller,
+	//		StorageAddress: &addr,
 	//		CodeAddress:    &codeAddress,
 	//		StorageSlot:    &slot,
 	//		StorageValue:   &val,
@@ -676,8 +679,8 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 			baseSlot := common.Hash(rawkey[32:])
 			valueSlot := common.Hash(hashOfKey)
 			t.callstack[len(t.callstack)-1].StorageKeys = append(t.callstack[len(t.callstack)-1].StorageKeys, StorageKey{
-				Address:     caller,
-				CodeAddress: &codeAddress,
+				Address:     addr,
+				CodeAddress: codeAddress,
 				BaseSlot:    baseSlot,
 				KeySlot:     valueSlot,
 				Key:         key,
