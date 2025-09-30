@@ -505,14 +505,16 @@ func (st *StateTransition) TransitionDb(refunds bool, gasBailout bool) (result *
 		if st.gasRemaining < gas || st.gasRemaining < floorGas7623 {
 			return nil, fmt.Errorf("%w: have %d, want %d", ErrIntrinsicGas, st.gasRemaining, max(gas, floorGas7623))
 		}
-		if t := st.evm.Config().Tracer; t != nil && t.OnGasChange != nil {
-			t.OnGasChange(st.gasRemaining, st.gasRemaining-gas, tracing.GasChangeTxIntrinsicGas)
-		}
-		st.gasRemaining -= gas
 	}
 	verifiedAuthorities, err := st.verifyAuthorities(auths, contractCreation, rules.ChainID.String())
 	if err != nil {
 		return nil, err
+	}
+	if !st.evm.Config().IgnoreGas {
+		if t := st.evm.Config().Tracer; t != nil && t.OnGasChange != nil {
+			t.OnGasChange(st.gasRemaining, st.gasRemaining-gas, tracing.GasChangeTxIntrinsicGas)
+		}
+		st.gasRemaining -= gas
 	}
 
 	var bailout bool
