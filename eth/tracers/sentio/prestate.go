@@ -27,10 +27,10 @@ import (
 	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/hexutil"
 	"github.com/erigontech/erigon-lib/crypto"
-	"github.com/erigontech/erigon-lib/types"
 	"github.com/erigontech/erigon/core/tracing"
 	"github.com/erigontech/erigon/core/vm"
 	"github.com/erigontech/erigon/eth/tracers"
+	"github.com/erigontech/erigon/execution/types"
 	"github.com/holiman/uint256"
 )
 
@@ -207,7 +207,7 @@ func (t *sentioPrestateTracer) CaptureState(pc uint64, opByte byte, gas, cost ui
 		t.lookupAccount(addr)
 	case op == vm.CREATE:
 		nonce, _ := t.env.IntraBlockState.GetNonce(caller)
-		addr := crypto.CreateAddress(caller, nonce)
+		addr := types.CreateAddress(caller, nonce)
 		t.lookupAccount(addr)
 		t.created[addr] = true
 	case stackLen >= 4 && op == vm.CREATE2:
@@ -216,7 +216,7 @@ func (t *sentioPrestateTracer) CaptureState(pc uint64, opByte byte, gas, cost ui
 		init := copyMemory(scope.MemoryData(), offset.Uint64(), size.Uint64())
 		inithash := crypto.Keccak256(init)
 		salt := stackData[stackLen-4]
-		addr := crypto.CreateAddress2(caller, salt.Bytes32(), inithash)
+		addr := types.CreateAddress2(caller, salt.Bytes32(), inithash)
 		t.lookupAccount(addr)
 		t.created[addr] = true
 	}
