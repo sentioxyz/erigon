@@ -7,17 +7,18 @@ import (
 	"math/big"
 	"sync/atomic"
 
-	"github.com/erigontech/erigon-lib/abi"
 	"github.com/erigontech/erigon-lib/common"
 	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/hexutil"
 	"github.com/erigontech/erigon-lib/common/math"
 	"github.com/erigontech/erigon-lib/crypto"
 	"github.com/erigontech/erigon-lib/log/v3"
-	"github.com/erigontech/erigon-lib/types"
 	"github.com/erigontech/erigon/core/tracing"
 	"github.com/erigontech/erigon/core/vm"
+	"github.com/erigontech/erigon/core/vm/evmtypes"
 	"github.com/erigontech/erigon/eth/tracers"
+	"github.com/erigontech/erigon/execution/abi"
+	"github.com/erigontech/erigon/execution/types"
 	"github.com/holiman/uint256"
 )
 
@@ -244,7 +245,11 @@ func (t *sentioTracer) CaptureStart(env *tracing.VMContext, tx types.Transaction
 	create := tx.IsContractDeploy()
 
 	t.env = env
-	rules := env.ChainConfig.Rules(env.BlockNumber, env.Time)
+	blockContext := evmtypes.BlockContext{
+		BlockNumber: env.BlockNumber,
+		Time:        env.Time,
+	}
+	rules := blockContext.Rules(env.ChainConfig)
 	t.activePrecompiles = vm.ActivePrecompiles(rules)
 
 	t.receipt.TxHash = &t.ctx.TxHash
