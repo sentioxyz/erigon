@@ -314,15 +314,15 @@ func (t *sentioTracer) captureEnd(output []byte, usedGas uint64, err error, reve
 }
 
 func (t *sentioTracer) CaptureEnter(depth int, typByte byte, from common.Address, to common.Address, precompile bool, input []byte, gas uint64, value *uint256.Int, code []byte) {
-	if depth == 0 {
-		return
-	}
 	// Skip if tracing was interrupted
 	if atomic.LoadUint32(&t.interrupt) > 0 {
 		return
 	}
 
 	typ := vm.OpCode(typByte)
+	if depth == 0 && typ != vm.CREATE && typ != vm.CREATE2 {
+		return
+	}
 	if typ == vm.CALL || typ == vm.CALLCODE {
 		// After enter, make the assumped transfer as function call
 		topElementTraces := t.callstack[len(t.callstack)-1].Traces
